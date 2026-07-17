@@ -256,6 +256,54 @@ A chronological record of the hard calls: the initial idea, why it seemed fine, 
 - ✅ Locked the ground-truth JSON contract (see `design_decisions.md` §3).
 - 💡 A shorthand that checks a *weaker* condition than the tool guarantees can hide a bug.
 
+### 8.3 Seed snapshot timing (harness bug)
+- 🔵 First harness passed a `seed_db_path` to the evaluator but never *created* the snapshot, and conceptually would have snapshotted at the wrong moment.
+- 🟢 Flagged: the "unchanged tables" baseline must be the DB state **after seeding, before the solution runs** — a task may legitimately seed custom rows, and "unchanged" means unchanged *by the solution's actions*, not vs. the default reset state.
+- ✅ Added `setup_db_for_task` (reset → seed → snapshot), a shared helper used by BOTH generation and evaluation so they can't diverge. Snapshot via `shutil.copy` after seed, before tools.
+- 💡 The immutability baseline is post-seed/pre-solution, not the default seed state.
+
+### 8.4 Frozen vs. live ground truth (regression-guard decision)
+- 🟢 Raised: should ground truth be regenerated every run, or frozen to disk?
+- ✅ **Frozen** — generated once at authoring, saved to `ground_truths/task_XX.json`, loaded by the runner.
+- 💡 If GT were regenerated from the current tools every run, a tool that breaks would break its GT identically → the task still "passes" → regression undetected. Frozen GT makes the suite a regression guard: a behavior change now fails the frozen expectation.
+
+### 8.5 Assert-success during generation
+- 🔵 (User's addition) `correct_sequence` returns a list of result dicts; `generate_and_freeze_ground_truth` asserts every call's `success` and raises otherwise.
+- ✅ A silently-failing correct-solution (e.g. a wrong date that gets refused) can no longer freeze a no-op state as "truth."
+- 💡 A broken solution should fail loudly at authoring, not produce a self-consistent-but-wrong ground truth. (Note: `run_harness` does NOT assert success — correct in W3, where the agent is allowed to fail and the eval catches it via state mismatch.)
+
+---
+
+## PHASE 9 — The Task Suite & the Refusal-Task Discovery
+
+### 9.1 Rich shared seed vs. minimal per-task seeds
+- 🔵 Proposed one comprehensive seed state covering all cases, so no task needs its own starting node.
+- 🟢 Rejected: (a) shared mutable state breaks task independence; (b) a rich seed makes ground truth HARDER — the evaluator checks the whole DB, so every task's GT must then assert the state of all bystander customers too. Minimal seeds keep GT small and focused.
+- ✅ `reset_db` seeds a small stable baseline (Alice/Bob/Carl); each task adds only what it needs via `seed_sql`. Reusable seed *fragments* OK; one monolith not.
+- 💡 Coverage lives in the tasks, not the seed. Small DB → small, verifiable ground truth.
+
+### 9.2 File layout & naming
+- ✅ `tools.py` (5 tools + helpers), `master_tools.py` (`reset_db(db_path)` — parameterized after a hardcoded-path mismatch risk was flagged), `evaluator.py` (grader: one state-pair → (bool, reason)), `runner.py` (proctor: Task class, setup, generation, run_suite), `tasks.py` (the Task objects), `ground_truths/*.json`.
+- 💡 Evaluator vs runner split: the grader knows nothing about tasks/seeding; the runner orchestrates and *calls* the grader. In W3 only the runner changes (swap correct_sequence for agent.run) — the verified grading core is never touched.
+
+### 9.3 First suite run — 9/15, and the refusal-task contradiction (CURRENT BLOCKER)
+- Context: 15 tasks authored (happy paths, both cancel branches, anti-abuse cancel, overlap downgrade, scheduled downgrade, direction refusals, no-ops, undo, a multi-step chain). Generated GTs, ran the suite.
+- **Result: 9/15 PASS. All 6 failures were refusal tasks, failing at GENERATION, not evaluation.**
+- 🟢 Diagnosis: `generate_and_freeze_ground_truth` asserts every result `success=True` (added in 8.5 to catch broken solutions) — but a refusal task's *correct* outcome IS `success=False` with an unchanged DB. The 8.5 safety assertion and the existence of refusal tasks contradict each other. One assumption ("every correct solution mutates state") is false for a whole task class.
+- 💡 A safety check built for one task class can silently outlaw another. "Correctly did nothing" is a legitimate, checkable ground truth (state == seed).
+- **OPEN (my decision to make):** Option A — `expect_success` flag on Task; generator asserts refusal for refusal-tasks and freezes the unchanged state. Option B — additionally assert the refusal *reason*. And the hard sub-question: for ambiguous prompts ("Downgrade me to Enterprise"), is correct behavior refuse/clarify (GT = unchanged) or infer-and-upgrade (GT = upgraded)? This decides what the eval rewards in W3.
+
+### 9.4 What a single anti-abuse task can't prove
+- 🟢 Flagged: one task landing in the delayed branch doesn't isolate the 90-day rule — the same outcome occurs when the charge is merely old. An anti-abuse task needs a *contrast twin* (identical except refund >90 days ago → immediate branch) so the outcome difference isolates the rule.
+- ✅ Adopted for the coverage matrix: rules are proven by contrast pairs, not single tasks.
+- 💡 A task tests a rule only if that rule is the only thing determining its outcome.
+
+### 9.5 Prompt/sequence agreement
+- Context: an early draft task had prompt "Cancel my plan" with a correct_sequence calling `downgrade_plan`.
+- 🟢 Flagged: prompt and answer key must describe the same action — in W3 the agent reads the *prompt*, and doing the right thing for it would fail a mismatched GT.
+- ✅ Fixed in the authored suite (cancel_03 now cancels). Rule: name, prompt, and sequence must all describe one scenario.
+- 💡 A task where the question and the answer key disagree fails the correct student.
+
 ---
 
 ## Meta-lessons (the through-lines, for the "what did you learn" question)

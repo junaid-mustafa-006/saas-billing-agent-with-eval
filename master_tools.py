@@ -1,11 +1,14 @@
 import sqlite3
+import os
 
-def reset_db():
-    conn = sqlite3.connect("billing.db")
+def reset_db(db_path="billing.db"):
+    if os.path.exists(db_path):
+        os.remove(db_path)
+        
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON")
     cursor = conn.cursor()
-    cursor.execute("PRAGMA foreign_keys = ON")
     
-    # 0. CLEAR DATABASE
     conn.executescript("""
         DROP TABLE IF EXISTS transactions;
         DROP TABLE IF EXISTS subscriptions;
@@ -14,7 +17,6 @@ def reset_db():
         DROP TABLE IF EXISTS users;
     """)
 
-    # 1. CREATE TABLES
     cursor.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             cus_id INTEGER PRIMARY KEY,
@@ -64,7 +66,6 @@ def reset_db():
         );
     """)
 
-    # 2. SEED CATALOG
     cursor.executescript("""
         INSERT OR IGNORE INTO catalog (plan_name, price_per_seat, seat_cap, duration_days) VALUES 
         ('Starter', 10.0, 5, 30),
@@ -72,9 +73,6 @@ def reset_db():
         ('Enterprise', 50.0, 100, 30);
     """)
 
-    # 3. SEED CUSTOMERS (Handling the circular reference)
-
-    # Customer 1: Alice - Mid-period on Pro (Current date is June 30, 2026)
     cursor.executescript("""
         INSERT OR IGNORE INTO users (cus_id, name, email, phone, active_sub_id) 
         VALUES (1, 'Alice', 'alice@example.com', '555-0101', NULL);
@@ -91,7 +89,6 @@ def reset_db():
         VALUES (1, 1, 1, 250.0, '2026-06-15', 'new');
     """)
 
-    # Customer 2: Bob - Near billing boundary on Starter (Renews in 2 days)
     cursor.executescript("""
         INSERT OR IGNORE INTO users (cus_id, name, email, phone, active_sub_id) 
         VALUES (2, 'Bob', 'bob@example.com', '555-0102', NULL);
@@ -108,7 +105,6 @@ def reset_db():
         VALUES (2, 2, 2, 20.0, '2026-06-02', 'new');
     """)
 
-    # Customer 3: Carl - Cancelled, no active sub
     cursor.executescript("""
         INSERT OR IGNORE INTO users (cus_id, name, email, phone, active_sub_id) 
         VALUES (3, 'Carl', 'carl@example.com', '555-0103', NULL);
@@ -119,12 +115,9 @@ def reset_db():
         INSERT OR IGNORE INTO subscriptions (sub_id, cus_id, plan_name, seats_used, start_date, end_date, status, autopay) 
         VALUES (3, 3, 'Enterprise', 50, '2026-04-01', '2026-05-01', 'cancelled', 0);
         
-        -- No UPDATE to users.active_sub_id because Carl is cancelled (remains NULL)
-        
         INSERT OR IGNORE INTO transactions (trans_id, cus_id, sub_id, amount_paid, payment_date, type) 
         VALUES (3, 3, 3, 2500.0, '2026-04-01', 'new');
     """)
 
     conn.commit()
-    print("Schema built and data seeded successfully.")
     conn.close()

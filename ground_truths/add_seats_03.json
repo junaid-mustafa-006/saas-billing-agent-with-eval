@@ -1,0 +1,94 @@
+{
+  "unchanged_tables": [
+    "catalog",
+    "payment_methods"
+  ],
+  "users": [
+    {
+      "cus_id": 1,
+      "name": "Alice",
+      "email": "alice@example.com",
+      "phone": "555-0101",
+      "active_sub_content": {
+        "plan_name": "Pro",
+        "start_date": "2026-06-15",
+        "end_date": "2026-07-15"
+      }
+    },
+    {
+      "cus_id": 2,
+      "name": "Bob",
+      "email": "bob@example.com",
+      "phone": "555-0102",
+      "active_sub_content": {
+        "plan_name": "Starter",
+        "start_date": "2026-06-02",
+        "end_date": "2026-07-02"
+      }
+    },
+    {
+      "cus_id": 3,
+      "name": "Carl",
+      "email": "carl@example.com",
+      "phone": "555-0103"
+    }
+  ],
+  "subscriptions": [
+    {
+      "plan_name": "Pro",
+      "seats_used": 10,
+      "start_date": "2026-06-15",
+      "end_date": "2026-07-15",
+      "status": "active",
+      "autopay": 1
+    },
+    {
+      "plan_name": "Starter",
+      "seats_used": 2,
+      "start_date": "2026-06-02",
+      "end_date": "2026-07-02",
+      "status": "active",
+      "autopay": 1
+    },
+    {
+      "plan_name": "Enterprise",
+      "seats_used": 50,
+      "start_date": "2026-04-01",
+      "end_date": "2026-05-01",
+      "status": "cancelled",
+      "autopay": 0
+    }
+  ],
+  "transactions": [
+    {
+      "type": "new",
+      "amount_paid": 250.0,
+      "payment_date": "2026-06-15",
+      "linked_sub": {
+        "plan_name": "Pro",
+        "start_date": "2026-06-15",
+        "end_date": "2026-07-15"
+      }
+    },
+    {
+      "type": "new",
+      "amount_paid": 20.0,
+      "payment_date": "2026-06-02",
+      "linked_sub": {
+        "plan_name": "Starter",
+        "start_date": "2026-06-02",
+        "end_date": "2026-07-02"
+      }
+    },
+    {
+      "type": "new",
+      "amount_paid": 2500.0,
+      "payment_date": "2026-04-01",
+      "linked_sub": {
+        "plan_name": "Enterprise",
+        "start_date": "2026-04-01",
+        "end_date": "2026-05-01"
+      }
+    }
+  ]
+}

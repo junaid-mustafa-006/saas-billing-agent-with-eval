@@ -351,6 +351,27 @@ Per-test reset is **not** required for eval correctness (the agent operates on a
 
 ---
 
+## 7.5 LLD: Task Harness (`harness.py`)
+
+Container + runner that ties tasks, tools, and the evaluator together.
+
+**`Task` object:** `{id, prompt, seed_sql, correct_sequence, ground_truth_file}`, where `correct_sequence` is a zero-arg lambda that runs the tool calls and **returns a list of result dicts** (so success can be asserted).
+
+**`setup_db_for_task(task, db_path, seed_db_path)`** — the shared setup used by BOTH generation and evaluation (prevents divergence):
+1. `reset_db()`
+2. apply `task.seed_sql` (if any)
+3. **snapshot** the DB to `seed_db_path` — *after seed, before any tool runs*. This snapshot is what the evaluator compares "unchanged tables" against, so it must capture the post-seed/pre-solution state (a task may seed custom rows that are legitimately present).
+
+**`generate_and_freeze_ground_truth(task, ...)`** — run ONCE at authoring time:
+- `setup_db_for_task` → run `correct_sequence()` → **assert every result `success`** (a failed tool call raises, preventing a no-op state being frozen as truth) → dump the ID-free state (same JOIN/round/`active_sub_content`/`linked_sub` queries as the evaluator) → write to `ground_truths/task_XX.json`.
+
+**`run_harness(tasks, ...)`** — the scorer:
+- for each task: `setup_db_for_task` → run the solution (`correct_sequence()` in W2; swap for `agent.run(prompt)` in W3) → **load the frozen JSON** → `evaluate_task(...)` → tally. Prints per-task PASS / FAIL-reason and a final `passed/total`.
+
+**Frozen (not live) ground truth — key decision:** ground truth is generated once and saved to disk, NOT regenerated each run. Rationale: if a tool bug later changes behavior, the frozen GT now fails — the eval catches the regression. If GT were regenerated from the current tools every run, a broken tool would break its GT identically and the task would still "pass" — the regression would go undetected. Frozen GT is what makes the suite a regression guard.
+
+---
+
 ## 8. Design Decisions & Rationale
 
 ### 8.1 Central principle — tools enforce, agent orchestrates
@@ -401,6 +422,7 @@ Renewal engine, `paused`, transaction status column, fine-tuning, payment gatewa
 ---
 
 ## 10. Open Questions / Known Limitations
+- **Refusal-task semantics (OPEN — the current blocker):** the first full suite run (15 tasks) scored 9/15; all 6 failures were REFUSAL tasks (cap-refusal, payment-refusal, cancel-noop, both wrong-direction tasks, undo-noop) that failed at *generation*, not evaluation. Root cause: `generate_and_freeze_ground_truth` asserts every tool result has `success=True` — but a refusal task's correct outcome IS the tool returning `success=False` with an unchanged DB. The generator's assumption ("every correct solution mutates state") contradicts the existence of refusal tasks. Proposed Option A: add `expect_success` flag to `Task`; for refusal tasks the generator asserts the refusal happened and freezes the unchanged state ("correctly did nothing" is a valid ground truth). Option B: additionally assert the tool's returned refusal reason. **Harder sub-question:** for ambiguous prompts ("Downgrade me to Enterprise" — actually an upgrade), is the correct final state "nothing changed" (agent refused/clarified) or "upgraded" (agent inferred intent and recovered)? Different ground truths; decides what the eval rewards in W3. Undecided.
 - **Linkage key (RESOLVED):** `linked_sub = {plan_name, start_date, end_date}`. Adding `end_date` distinguishes same-day-churn subs (a cancelled sub stamped to today vs an active one running to term). "One active subscription" was insufficient (constrains only active subs, not history). Residual case (two subs identical across all three fields) is benign — byte-identical rows are genuinely fungible, so a multiset is correct to treat them as interchangeable; adding `status` would not remove this residual, so three fields is the stopping point.
 - **Dangling `active_sub_id` (unfixed):** an `active_sub_id` pointing to a non-existent sub LEFT-JOINs to NULL, identical to a legitimately-NULL pointer — an adversarial task could exploit this. Acceptable for now; would need an explicit "pointer references an existing row" assertion to harden.
 - **Bad-date input (unfixed):** `prorated_amount` raises `ValueError` outside the DB try-block in some tools, so a malformed agent-supplied date crashes the tool rather than returning a failure dict. Acceptable for valid-input tasks.
