@@ -6,42 +6,38 @@ import master_tools
 from evaluator import evaluate_task
 
 class Task:
-    # Notice expect_success=True is added right here
-    def __init__(self, id, prompt, seed_sql, correct_sequence, ground_truth_file, expect_success=True):
+    def __init__(self, id, prompt, seed_sql, correct_sequence, ground_truth_file, expect_success=True, cus_id=1, today="2026-06-20"):
         self.id = id
         self.prompt = prompt
         self.seed_sql = seed_sql
-        self.correct_sequence = correct_sequence 
+        self.correct_sequence = correct_sequence
         self.ground_truth_file = ground_truth_file
         self.expect_success = expect_success
+        self.cus_id = cus_id
+        self.today = today
 
 def setup_db_for_task(task, db_path, seed_db_path):
     master_tools.reset_db(db_path)
-    
     if task.seed_sql:
         conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(task.seed_sql)
         conn.commit()
         conn.close()
-        
     shutil.copy(db_path, seed_db_path)
 
 def generate_and_freeze_ground_truth(task, db_path, seed_db_path):
     setup_db_for_task(task, db_path, seed_db_path)
-    
-    results = task.correct_sequence()
+    results = task.correct_sequence(task.today)
     for res in results:
-        # This handles the refusal logic
         if task.expect_success and not res.get("success"):
             raise RuntimeError(f"Tool failed unexpectedly during GT generation for Task {task.id}: {res}")
         elif not task.expect_success and res.get("success"):
             raise RuntimeError(f"Tool succeeded unexpectedly during GT generation for Refusal Task {task.id}: {res}")
-            
+    
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    
     gt = {"unchanged_tables": ["catalog", "payment_methods"], "users": [], "subscriptions": [], "transactions": []}
     
     cur.execute("SELECT u.cus_id, u.name, u.email, u.phone, s.plan_name, s.start_date, s.end_date FROM users u LEFT JOIN subscriptions s ON u.active_sub_id = s.sub_id")
@@ -69,13 +65,29 @@ def generate_and_freeze_ground_truth(task, db_path, seed_db_path):
         json.dump(gt, f, indent=2)
     print(f"Ground truth frozen for Task {task.id} at {task.ground_truth_file}")
 
-def run_suite(tasks, db_path, seed_db_path):
+def run_suite(tasks, db_path, seed_db_path, agent_mode=False, backend="anthropic"):
+    if agent_mode:
+        if backend == "anthropic":
+            import agent_claude as agent
+        elif backend == "gemini":
+            import agent_gemini as agent
+        else:
+            raise ValueError(f"Unknown backend requested: {backend}")
+
     passed = 0
     for t in tasks:
         setup_db_for_task(t, db_path, seed_db_path)
         
-        t.correct_sequence()
-        
+        response_text = ""
+        if agent_mode:
+            try:
+                response_text = agent.run_agent(t.prompt, t.cus_id, today=t.today)
+            except Exception as e:
+                print(f"Task {t.id}: FAIL - API/Network Error: {str(e)}")
+                continue
+        else:
+            t.correct_sequence(t.today)
+            
         try:
             with open(t.ground_truth_file, 'r') as f:
                 ground_truth = json.load(f)
@@ -84,11 +96,13 @@ def run_suite(tasks, db_path, seed_db_path):
             continue
             
         ok, reason = evaluate_task(db_path, ground_truth, seed_db_path)
-        
         if ok:
             passed += 1
             print(f"Task {t.id}: PASS")
         else:
-            print(f"Task {t.id}: FAIL - {reason}")
-            
+            if agent_mode:
+                print(f"Task {t.id}: FAIL - {reason}\nAgent Response: {response_text}")
+            else:
+                print(f"Task {t.id}: FAIL - {reason}")
+                
     print(f"\nFinal Score: {passed}/{len(tasks)}")

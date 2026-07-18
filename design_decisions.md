@@ -14,6 +14,7 @@ A complete design record: high-level architecture, low-level design (schema DDL,
 9. [Recurring Principles](#9-recurring-principles)
 10. [Open Questions / Known Limitations](#10-open-questions--known-limitations)
 11. [Future Work](#11-future-work)
+12. [W3: Agent Architecture](#12-w3-agent-architecture)
 
 ---
 
@@ -428,6 +429,8 @@ Renewal engine, `paused`, transaction status column, fine-tuning, payment gatewa
 - **Dangling `active_sub_id` (unfixed):** an `active_sub_id` pointing to a non-existent sub LEFT-JOINs to NULL, identical to a legitimately-NULL pointer — an adversarial task could exploit this. Acceptable for now; would need an explicit "pointer references an existing row" assertion to harden.
 - **Bad-date input (unfixed):** `prorated_amount` raises `ValueError` outside the DB try-block in some tools, so a malformed agent-supplied date crashes the tool rather than returning a failure dict. Acceptable for valid-input tasks.
 - **Evaluator reason granularity:** returns the first mismatching *table*, not the specific differing rows. Enough for debugging which table diverged; could be extended to diff the multisets and report the differing tuples.
+- **`downgrade_02` ground-truth/policy contradiction (OPEN, found in W3 agent-mode testing):** the frozen ground truth assumes the agent proactively supplies `seats=5` for a prompt that never states a seat count ("Switch my plan to Starter"), directly contradicting the system prompt's explicit instruction not to preemptively adjust seat counts. A correctly-policy-following agent (confirmed on two separate models) refuses this task as an overflow, which the current ground truth marks wrong. Resolve by either restating the prompt to include an explicit seat count, or converting to `expect_success=False` with unchanged-state ground truth.
+- **`chain_01` final-state ambiguity (OPEN, found in W3 agent-mode testing):** "I need 15 total seats, and upgrade me to Enterprise" has at least two distinct valid final states depending on tool-call path — the authored two-step path (`add_seats` then `upgrade_plan`, producing a `seat_add` + `upgrade` ledger) versus a single-call `upgrade_plan(seats=15)` (producing only an `upgrade` row, with proration computed against the pre-add seat count). Both plausibly satisfy the stated prompt; they produce different money. Undecided whether one is canonically correct, or whether the evaluator should be redesigned to accept either.
 
 ---
 
@@ -446,3 +449,204 @@ Deferred items, each with why it's out of scope now rather than a vague "later."
 9. **Blog write-up (W6)** — "τ-bench-style billing agent eval: what broke and what self-correction bought."
 10. **Additional tools/scenarios** — plan pause/resume, promo codes, multi-currency.
 11. **Refund-as-negative-amount ledger** refactor — if plain-sum net revenue is ever wanted.
+
+---
+
+## 12. W3: Agent Architecture
+
+### 12.1 Components
+
+```text
+run_suite(agent_mode=True, backend="anthropic" | "gemini")
+│
+▼
+agent_claude.py / agent_gemini.py
+│  (backend-specific: tool schemas, API client, response parsing)
+▼
+policy_prompt.py :: get_system_prompt(cus_id, today)
+│  (shared: single source of policy text imported by both backends)
+▼
+Tool loop:
+    call model → inspect tool requests → dispatch tools → repeat
+│
+▼
+Dispatcher (tool name → tools.py function)
+│
+▼
+SQLite database
+```
+
+---
+
+### 12.2 Backend-specific vs. shared components
+
+### Backend-specific
+
+The following components are necessarily implemented separately for each backend:
+
+- Tool schema definitions (Anthropic and Gemini use different JSON schema formats and field names).
+- API client initialization and request construction.
+- Response parsing and tool-call extraction.
+- Conversation history representation.
+- Loop termination logic (`stop_reason` for Anthropic versus `finish_reason` or an empty function-call list for Gemini).
+
+### Shared
+
+The following components are backend-agnostic and imported by both agents:
+
+- `policy_prompt.py` (system prompt)
+- `tools.py` (dispatcher and business logic)
+- `tasks.py` (task definitions)
+- `runner.py`
+- `evaluator.py`
+
+None of these modules depend on which LLM generated the tool calls; they operate solely on tool invocations and resulting database state.
+
+---
+
+### 12.3 Determinism injection: `today` and `cus_id`
+
+Neither `today` nor `cus_id` is exposed as a tool parameter for the model to generate.
+
+Instead, both are Python arguments to:
+
+```python
+run_agent(prompt, cus_id, today)
+```
+
+These values originate from `Task.cus_id` and `Task.today` inside the evaluation harness and are injected only when the dispatcher invokes the underlying tool functions.
+
+This preserves the W1 design principle (§4.1): `today` remains entirely harness-controlled rather than depending on the real system clock or model-generated values.
+
+---
+
+### 12.4 Tool exposure boundary
+
+The agent is exposed to:
+
+### Write tools (5)
+
+- All five write tools
+
+### Read tools (3)
+
+- `get_customer`
+- `get_active_subscription`
+- `get_plan`
+
+The following helper functions are intentionally **not** exposed:
+
+- `get_total_paid_for_sub`
+- `is_refund_applicable`
+- `get_last_transaction`
+- `get_last_refund`
+- `get_valid_payment_method`
+
+These helpers perform financial calculations or validation logic. Hiding them prevents the model from attempting monetary reasoning itself, reinforcing the design principle established in §§4.2, 4.6, and 8.1: **tools enforce policy; the agent only orchestrates tool usage.**
+
+### Deliberate asymmetry: seat caps vs. payment status
+
+`get_plan` exposes the plan's `seat_cap`, allowing the agent to anticipate seat-cap violations when selecting plans.
+
+In contrast, `get_valid_payment_method` is deliberately hidden. Payment validity is treated as a hard business rule that must be enforced exclusively by the write tools. The agent must attempt the requested operation and rely on the tool's response rather than making its own judgment about payment status.
+
+In short:
+
+- Seat-cap information is agent-visible because it supports planning.
+- Payment status is tool-owned because it represents authoritative business logic.
+
+---
+
+### 12.5 Smart recovery policy
+
+### Plan-direction ambiguity
+
+For ambiguous requests such as:
+
+> "Downgrade me to Enterprise."
+
+the agent ignores the verb ("downgrade") and instead determines the intended operation from the requested plan's position in `PLAN_TIERS`.
+
+It then invokes the appropriate write tool (`upgrade_plan` or `downgrade_plan`) accordingly.
+
+The `Direction Error` checks inside `upgrade_plan` and `downgrade_plan` remain as defense-in-depth but are intentionally unreachable under correct agent behavior. They exist solely to catch routing bugs.
+
+### Seat-cap overflow
+
+Seat-cap failures are handled differently.
+
+The system prompt instructs the agent to submit the request using either:
+
+- the seat count explicitly requested by the user, or
+- the current subscription's seat count if none is specified.
+
+The agent must **not** automatically reduce the seat count to satisfy a plan's capacity limit.
+
+If the write tool rejects the operation because the seat count exceeds the destination plan's cap, the refusal is reported directly to the user without retrying or negotiating.
+
+---
+
+### 12.6 Baseline definition (W3 scope boundary)
+
+The W3 baseline agent operates within a single conversational turn while executing a complete tool loop.
+
+It repeatedly:
+
+1. calls the language model,
+2. executes requested tools,
+3. returns tool results to the model,
+
+until either:
+
+- the model stops requesting tools, or
+- a maximum of 10 tool iterations is reached as a runaway safeguard.
+
+The baseline intentionally performs **no self-correction**.
+
+If any write tool returns:
+
+```python
+success = False
+```
+
+the agent immediately reports the tool's refusal and terminates.
+
+It does **not**:
+
+- retry with modified parameters,
+- negotiate alternative actions,
+- ask follow-up questions, or
+- search for another solution.
+
+These behaviors are intentionally deferred to **W4**, where self-correction will be introduced and evaluated. The resulting improvement in task success rate over this W3 baseline forms the primary experimental metric.
+
+---
+
+### 12.7 Harness integration
+
+No separate evaluation script exists for the agent.
+
+Instead, the existing interface is extended:
+
+```python
+run_suite(
+    tasks,
+    db_path,
+    seed_db_path,
+    agent_mode=False,
+    backend="anthropic",
+)
+```
+
+- `agent_mode=False` executes each task's original `correct_sequence()` implementation, preserving the proof-of-evaluation pipeline introduced in W2.
+- `agent_mode=True` invokes:
+
+```python
+agent.run_agent(prompt, cus_id, today)
+```
+
+using the selected backend.
+
+Regardless of execution mode, the resulting SQLite database state is evaluated by the same `evaluate_task()` function.
+
+The evaluation framework therefore remains completely backend-agnostic and never branches based on whether database modifications were produced by deterministic tool calls or by an LLM agent.
