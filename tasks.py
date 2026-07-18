@@ -164,7 +164,7 @@ t_downgrade_overlap = Task(
 
 t_downgrade_scheduled = Task(
     id="downgrade_02",
-    prompt="Switch my plan to Starter.",
+    prompt="Switch my plan to Starter, dropping to 5 seats.",
     seed_sql="""
         UPDATE subscriptions
         SET start_date='2026-06-01'

@@ -429,8 +429,8 @@ Renewal engine, `paused`, transaction status column, fine-tuning, payment gatewa
 - **Dangling `active_sub_id` (unfixed):** an `active_sub_id` pointing to a non-existent sub LEFT-JOINs to NULL, identical to a legitimately-NULL pointer — an adversarial task could exploit this. Acceptable for now; would need an explicit "pointer references an existing row" assertion to harden.
 - **Bad-date input (unfixed):** `prorated_amount` raises `ValueError` outside the DB try-block in some tools, so a malformed agent-supplied date crashes the tool rather than returning a failure dict. Acceptable for valid-input tasks.
 - **Evaluator reason granularity:** returns the first mismatching *table*, not the specific differing rows. Enough for debugging which table diverged; could be extended to diff the multisets and report the differing tuples.
-- **`downgrade_02` ground-truth/policy contradiction (OPEN, found in W3 agent-mode testing):** the frozen ground truth assumes the agent proactively supplies `seats=5` for a prompt that never states a seat count ("Switch my plan to Starter"), directly contradicting the system prompt's explicit instruction not to preemptively adjust seat counts. A correctly-policy-following agent (confirmed on two separate models) refuses this task as an overflow, which the current ground truth marks wrong. Resolve by either restating the prompt to include an explicit seat count, or converting to `expect_success=False` with unchanged-state ground truth.
-- **`chain_01` final-state ambiguity (OPEN, found in W3 agent-mode testing):** "I need 15 total seats, and upgrade me to Enterprise" has at least two distinct valid final states depending on tool-call path — the authored two-step path (`add_seats` then `upgrade_plan`, producing a `seat_add` + `upgrade` ledger) versus a single-call `upgrade_plan(seats=15)` (producing only an `upgrade` row, with proration computed against the pre-add seat count). Both plausibly satisfy the stated prompt; they produce different money. Undecided whether one is canonically correct, or whether the evaluator should be redesigned to accept either.
+- **`downgrade_02` ground-truth/policy contradiction (RESOLVED):** fixed by restating the prompt to include an explicit seat count ("Switch my plan to Starter, dropping to 5 seats"), matching `downgrade_01`'s pattern. `correct_sequence` and ground truth were already correct — the prompt was the only thing out of alignment with policy. No regeneration needed.
+- **`chain_01` final-state ambiguity (RESOLVED):** kept the two-step ground truth (`add_seats` then `upgrade_plan`) as canonical — a seat-add and a plan-upgrade are distinct billing events worth separate ledger rows, same principle as §8.5 (the ledger records what actually happened, not just the net financial effect). Fixed via a new system-prompt rule (§12.5/policy_prompt.py EXECUTION RULES) requiring multi-step requests to be executed as separate, sequential tool calls **in the order stated**, with any "total count" target converted to a delta from current state before the corresponding call. Confirmed both totals were mathematically identical either way (541.67) — this was a ledger-shape disagreement, not a money bug.
 
 ---
 
@@ -583,6 +583,14 @@ The system prompt instructs the agent to submit the request using either:
 The agent must **not** automatically reduce the seat count to satisfy a plan's capacity limit.
 
 If the write tool rejects the operation because the seat count exceeds the destination plan's cap, the refusal is reported directly to the user without retrying or negotiating.
+
+### Multi-step request sequencing
+
+For requests naming multiple distinct actions (e.g. "I need X total seats, and upgrade me to Y"), the agent executes each named action as a **separate, sequential tool call, in the order the user stated them** — it does not consolidate multiple actions into a single call, and does not reorder them, even when a single call could reach a similar net financial outcome.
+
+Rationale: a seat-add and a plan-upgrade are distinct billing events, and the transaction ledger should record both as separate facts (same principle as §8.5 — the ledger is the record of what happened, not just the net effect). A consolidated single-call path can reach the same total charge but produces a different, less granular ledger, which the evaluator correctly treats as a different final state.
+
+If a stated target is a **total count** rather than a delta (e.g. "15 total seats" when the customer currently has 10), the agent computes the required delta from the customer's current state (via `get_active_subscription`) before issuing that step's call, rather than passing the total directly to a delta-based tool like `add_seats`.
 
 ---
 
