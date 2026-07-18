@@ -292,6 +292,7 @@ A chronological record of the hard calls: the initial idea, why it seemed fine, 
 - 🟢 Diagnosis: `generate_and_freeze_ground_truth` asserts every result `success=True` (added in 8.5 to catch broken solutions) — but a refusal task's *correct* outcome IS `success=False` with an unchanged DB. The 8.5 safety assertion and the existence of refusal tasks contradict each other. One assumption ("every correct solution mutates state") is false for a whole task class.
 - 💡 A safety check built for one task class can silently outlaw another. "Correctly did nothing" is a legitimate, checkable ground truth (state == seed).
 - **OPEN (my decision to make):** Option A — `expect_success` flag on Task; generator asserts refusal for refusal-tasks and freezes the unchanged state. Option B — additionally assert the refusal *reason*. And the hard sub-question: for ambiguous prompts ("Downgrade me to Enterprise"), is correct behavior refuse/clarify (GT = unchanged) or infer-and-upgrade (GT = upgraded)? This decides what the eval rewards in W3.
+- **RESOLVED (9.6, 9.7):** Option A adopted for refusal semantics. Ambiguous-direction prompts resolved via smart recovery (agent routes by named plan, not verb), applied symmetrically to both `downgrade_plan` and `upgrade_plan`. Direction-guard code paths remain in `tools.py` but are now untested — off the correct-agent path, defense-in-depth only. Suite at 15/15.
 
 ### 9.4 What a single anti-abuse task can't prove
 - 🟢 Flagged: one task landing in the delayed branch doesn't isolate the 90-day rule — the same outcome occurs when the charge is merely old. An anti-abuse task needs a *contrast twin* (identical except refund >90 days ago → immediate branch) so the outcome difference isolates the rule.
@@ -303,6 +304,28 @@ A chronological record of the hard calls: the initial idea, why it seemed fine, 
 - 🟢 Flagged: prompt and answer key must describe the same action — in W3 the agent reads the *prompt*, and doing the right thing for it would fail a mismatched GT.
 - ✅ Fixed in the authored suite (cancel_03 now cancels). Rule: name, prompt, and sequence must all describe one scenario.
 - 💡 A task where the question and the answer key disagree fails the correct student.
+
+### 9.6 Resolving the refusal-task contradiction
+- Context: 9/15 first run, all 6 failures were refusal tasks failing at generation (see 9.3).
+- ✅ **Option A adopted.** Added `expect_success` (default `True`) to `Task`. `generate_and_freeze_ground_truth` now branches: `expect_success=True` + tool fails → raise (broken correct-solution, same as before); `expect_success=False` + tool succeeds → raise (a refusal task that unexpectedly mutated state is equally broken); otherwise freeze whatever state resulted. "Correctly did nothing" is now a legitimate, checkable ground truth.
+- Option B (also assert the refusal's `reason` string) was considered and **not** taken — the DB-state check already proves the refusal happened and left no side effects; asserting exact reason text would couple the test suite to wording, not behavior. Reason strings stay a debugging aid, not a graded field.
+- 💡 The fix was one flag, not new architecture — the generator's assumption was too narrow, not wrong in kind.
+
+### 9.7 The ambiguous-direction question — smart recovery, not refuse/clarify
+- Context: 9.3 also flagged the harder sub-question — for a wrong-tier prompt like "Downgrade me to Enterprise," is the correct end-state "refused, unchanged" or "agent inferred real intent and acted"?
+- 🔵 **Decided: smart recovery.** The verb ("upgrade"/"downgrade") is treated as unreliable human phrasing; the agent routes off the named plan, not the word describing direction. A user saying "downgrade me to Enterprise" almost certainly means "put me on Enterprise," and refusing over word choice is punishing the customer for the eval's own pedantry, not for an actual error.
+- 🟢 Pushback considered: doesn't this delete the tools' own direction-guard safety net? Countered — no. The guard in `tools.py` (`downgrade_plan` refuses if target tier is higher; `upgrade_plan` refuses if target tier is lower/equal) still exists in code and still fires if it's ever hit directly. It just isn't reachable by a *correctly-behaving* agent anymore, because the agent now checks tier itself before picking which tool to call and calls the right one. A future dev deleting that guard from `tools.py` would be removing a safety net with no test catching it — accepted as their mistake to own, the same way unprotected payment logic would be.
+- ✅ Both `downgrade_plan` and `upgrade_plan` follow the same policy: agent resolves direction from the named plan, calls the correct tool, guard is defense-in-depth only.
+- Applied consistently: `downgrade_03` ("Downgrade me to Enterprise") → agent calls `upgrade_plan`, `expect_success=True` (10 seats fits Enterprise's 100 cap, so recovery succeeds cleanly). `upgrade_02` ("Upgrade me to Starter") → agent calls `downgrade_plan`, `expect_success=False` (Alice's 10 seats exceed Starter's 5-seat cap — recovery is *attempted* correctly but the seat-cap guard, a separate and still-live rule, refuses it; DB stays untouched).
+- **Caught a self-inconsistency mid-implementation:** an earlier pass changed `upgrade_02` to smart-recovery but left `downgrade_03` on the old direction-refusal expectation — same tools, same policy, opposite test verdicts, no stated reason. Fixed by reversing `downgrade_03` to match. Traced from a review question ("why does one tool refuse and the other recover for the same class of prompt?") rather than caught proactively.
+- 💡 A policy applied to one tool and not its mirror-image sibling is a bug even if every individual test passes — check policy symmetry, not just per-task correctness.
+
+### 9.8 Payment-refusal test was silently testing the wrong guard
+- Context: `add_seats_03` was originally written against Carl (`prompt: "I need 5 more seats"`), intended to test the "no valid payment method" branch.
+- 🟢 Flagged: `add_seats` checks for an active subscription *before* checking payment method, and Carl's `active_sub_id` is NULL — so the call actually fails on "No active subscription," identical to what `cancel_04` already tests. The payment-method guard had zero coverage, invisibly.
+- 🔵 **[User's fix]** Reused Alice instead of adding a new seed customer: `seed_sql="UPDATE payment_methods SET status = 'expired' WHERE cus_id = 1;"` — active sub present, seat count (10→15) safely under Pro's cap of 20, so payment status is the sole thing that can fail the call.
+- ✅ `add_seats_03` now on Alice, `expect_success=False`, isolates the payment guard for real.
+- 💡 A duplicate-looking refusal task (same failure class as another task) is coverage theater — trace which `if` actually fired, don't assume the prompt's stated intent matches the code path it hits.
 
 ---
 

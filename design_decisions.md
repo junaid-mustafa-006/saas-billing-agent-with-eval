@@ -422,7 +422,8 @@ Renewal engine, `paused`, transaction status column, fine-tuning, payment gatewa
 ---
 
 ## 10. Open Questions / Known Limitations
-- **Refusal-task semantics (OPEN — the current blocker):** the first full suite run (15 tasks) scored 9/15; all 6 failures were REFUSAL tasks (cap-refusal, payment-refusal, cancel-noop, both wrong-direction tasks, undo-noop) that failed at *generation*, not evaluation. Root cause: `generate_and_freeze_ground_truth` asserts every tool result has `success=True` — but a refusal task's correct outcome IS the tool returning `success=False` with an unchanged DB. The generator's assumption ("every correct solution mutates state") contradicts the existence of refusal tasks. Proposed Option A: add `expect_success` flag to `Task`; for refusal tasks the generator asserts the refusal happened and freezes the unchanged state ("correctly did nothing" is a valid ground truth). Option B: additionally assert the tool's returned refusal reason. **Harder sub-question:** for ambiguous prompts ("Downgrade me to Enterprise" — actually an upgrade), is the correct final state "nothing changed" (agent refused/clarified) or "upgraded" (agent inferred intent and recovered)? Different ground truths; decides what the eval rewards in W3. Undecided.
+- **Refusal-task semantics (RESOLVED):** `Task` gained an `expect_success` flag (default `True`). The generator asserts the tool result matches this expectation — `True` requires success (broken-solution guard, as before), `False` requires the tool to have refused — and freezes whichever state resulted. "Correctly did nothing" is a first-class ground truth.
+- **Ambiguous-direction prompts (RESOLVED):** correct behavior is **smart recovery**, not refuse-and-clarify. The agent is expected to resolve direction from the *named plan* against `PLAN_TIERS`, ignoring the verb the user used, and call the correspondingly correct tool (`upgrade_plan` or `downgrade_plan`). Applied identically to both tools. Consequence: the `Direction Error` refusal branches in `downgrade_plan` and `upgrade_plan` are intentionally **untested** — they're unreachable by a correctly-behaving agent and exist purely as defense-in-depth against a bug in the agent's own routing, not as a customer-facing guard. This is a deliberate scope line, not an oversight: testing a branch that's off the correct-operation path is low marginal value at this project's scope. See `future_work.md` for the caveat once a user-simulator exists.
 - **Linkage key (RESOLVED):** `linked_sub = {plan_name, start_date, end_date}`. Adding `end_date` distinguishes same-day-churn subs (a cancelled sub stamped to today vs an active one running to term). "One active subscription" was insufficient (constrains only active subs, not history). Residual case (two subs identical across all three fields) is benign — byte-identical rows are genuinely fungible, so a multiset is correct to treat them as interchangeable; adding `status` would not remove this residual, so three fields is the stopping point.
 - **Dangling `active_sub_id` (unfixed):** an `active_sub_id` pointing to a non-existent sub LEFT-JOINs to NULL, identical to a legitimately-NULL pointer — an adversarial task could exploit this. Acceptable for now; would need an explicit "pointer references an existing row" assertion to harden.
 - **Bad-date input (unfixed):** `prorated_amount` raises `ValueError` outside the DB try-block in some tools, so a malformed agent-supplied date crashes the tool rather than returning a failure dict. Acceptable for valid-input tasks.
@@ -431,13 +432,17 @@ Renewal engine, `paused`, transaction status column, fine-tuning, payment gatewa
 ---
 
 ## 11. Future Work
-1. **Fine-tuning** a billing-specialist model, benchmarked against the base model on this eval (the eval is the prerequisite).
-2. **Mock payment gateway** — live payment simulation to watch the agent act (demo/UX layer).
-3. **Daily renewal engine** — server sweep: retries autopay, flips `scheduled_activation → active` and `scheduled_downgrade → cancelled` at term-end, sets `paused` on failed renewal. Reintroduces `paused`.
-4. **`paused` state + failed-renewal handling** — depends on #3.
-5. **Payment-date guard on the 7-day check** — required once renewals exist, so a renewal charge isn't wrongly denied a refund window. (Renewal refunds intentionally human-handled.)
-6. **LLM user-simulator** — multi-turn eval; only after core eval is trustworthy.
-7. **Multi-model benchmarking** — run the eval across several LLMs (blog extension).
-8. **Blog write-up (W6)** — "τ-bench-style billing agent eval: what broke and what self-correction bought."
-9. **Additional tools/scenarios** — plan pause/resume, promo codes, multi-currency.
-10. **Refund-as-negative-amount ledger** refactor — if plain-sum net revenue is ever wanted.
+
+Deferred items, each with why it's out of scope now rather than a vague "later."
+
+1. **Smart-recovery vs. clarify, under a user-simulator.** Current ground truth treats ambiguous-direction prompts ("Downgrade me to Enterprise") as silently recoverable — the agent infers intent from the named plan and acts (§8.6 direction policy). Once a multi-turn LLM user-simulator exists (see #6 below), a *better* agent might legitimately ask "did you mean upgrade to Enterprise?" instead of guessing — and for `upgrade_02` specifically, a recovering agent could ask for a lower seat count instead of accepting the seat-cap refusal as final. Current frozen GT would fail both of those better behaviors. Revisit whether smart-recovery should be the ceiling or the floor once clarification is actually measurable.
+2. **Fine-tuning** a billing-specialist model, benchmarked against the base model on this eval (the eval is the prerequisite).
+3. **Mock payment gateway** — live payment simulation to watch the agent act (demo/UX layer).
+4. **Daily renewal engine** — server sweep: retries autopay, flips `scheduled_activation → active` and `scheduled_downgrade → cancelled` at term-end, sets `paused` on failed renewal. Reintroduces `paused`.
+5. **`paused` state + failed-renewal handling** — depends on #4.
+6. **LLM user-simulator** — multi-turn eval; only after core eval is trustworthy. Also unblocks #1.
+7. **Payment-date guard on the 7-day check** — required once renewals exist, so a renewal charge isn't wrongly denied a refund window. (Renewal refunds intentionally human-handled.)
+8. **Multi-model benchmarking** — run the eval across several LLMs (blog extension).
+9. **Blog write-up (W6)** — "τ-bench-style billing agent eval: what broke and what self-correction bought."
+10. **Additional tools/scenarios** — plan pause/resume, promo codes, multi-currency.
+11. **Refund-as-negative-amount ledger** refactor — if plain-sum net revenue is ever wanted.

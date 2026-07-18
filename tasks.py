@@ -79,13 +79,13 @@ t_downgrade_scheduled = Task(
     ground_truth_file="ground_truths/downgrade_02.json"
 )
 
-t_downgrade_direction_refusal = Task(
+t_downgrade_smart_recovery = Task(
     id="downgrade_03",
     prompt="Downgrade me to Enterprise.",
     seed_sql="",
-    correct_sequence=lambda: [tools.downgrade_plan(cus_id=1, new_plan_name='Enterprise', today='2026-06-20')],
+    correct_sequence=lambda: [tools.upgrade_plan(cus_id=1, new_plan_name='Enterprise', today='2026-06-20')],
     ground_truth_file="ground_truths/downgrade_03.json",
-    expect_success=False
+    expect_success=True
 )
 
 t_upgrade_mid_cycle = Task(
@@ -133,7 +133,7 @@ t_multistep_chain = Task(
 ALL_TASKS = [
     t_add_seats_happy, t_add_seats_cap_refusal, t_add_seats_payment_refusal,
     t_cancel_immediate, t_cancel_delayed, t_cancel_anti_abuse, t_cancel_noop,
-    t_downgrade_overlap, t_downgrade_scheduled, t_downgrade_direction_refusal,
+    t_downgrade_overlap, t_downgrade_scheduled, t_downgrade_smart_recovery,
     t_upgrade_mid_cycle, t_upgrade_smart_recovery, t_undo_happy, t_undo_noop, t_multistep_chain
 ]
 

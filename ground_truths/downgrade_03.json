@@ -10,9 +10,9 @@
       "email": "alice@example.com",
       "phone": "555-0101",
       "active_sub_content": {
-        "plan_name": "Pro",
-        "start_date": "2026-06-15",
-        "end_date": "2026-07-15"
+        "plan_name": "Enterprise",
+        "start_date": "2026-06-20",
+        "end_date": "2026-07-20"
       }
     },
     {
@@ -38,9 +38,9 @@
       "plan_name": "Pro",
       "seats_used": 10,
       "start_date": "2026-06-15",
-      "end_date": "2026-07-15",
-      "status": "active",
-      "autopay": 1
+      "end_date": "2026-06-20",
+      "status": "cancelled",
+      "autopay": 0
     },
     {
       "plan_name": "Starter",
@@ -57,6 +57,14 @@
       "end_date": "2026-05-01",
       "status": "cancelled",
       "autopay": 0
+    },
+    {
+      "plan_name": "Enterprise",
+      "seats_used": 10,
+      "start_date": "2026-06-20",
+      "end_date": "2026-07-20",
+      "status": "active",
+      "autopay": 1
     }
   ],
   "transactions": [
@@ -67,7 +75,7 @@
       "linked_sub": {
         "plan_name": "Pro",
         "start_date": "2026-06-15",
-        "end_date": "2026-07-15"
+        "end_date": "2026-06-20"
       }
     },
     {
@@ -88,6 +96,16 @@
         "plan_name": "Enterprise",
         "start_date": "2026-04-01",
         "end_date": "2026-05-01"
+      }
+    },
+    {
+      "type": "upgrade",
+      "amount_paid": 291.67,
+      "payment_date": "2026-06-20",
+      "linked_sub": {
+        "plan_name": "Enterprise",
+        "start_date": "2026-06-20",
+        "end_date": "2026-07-20"
       }
     }
   ]
