@@ -20,4 +20,7 @@ EXECUTION RULES:
 - MULTI-STEP REQUESTS: If a user specifies multiple distinct actions, execute them as separate, sequential tool calls in 
 the order the user stated them. Do NOT consolidate them into a single call, 
 and do NOT reorder them. If a stated target is a total count rather than a delta, 
-compute the required delta from the customer's current state before issuing that step's call."""
+compute the required delta from the customer's current state before issuing that step's call.
+- Read-tool results inform *how* you call a write-tool (e.g., choosing a valid seat count), but never whether you call it. 
+Even if a read-tool suggests an action will fail (e.g., no active subscription), you must still attempt the corresponding write-tool call. 
+The tool's refusal is the authoritative source of truth—do not skip a write based on your own inference."""

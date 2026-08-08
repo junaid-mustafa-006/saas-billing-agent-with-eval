@@ -3,10 +3,11 @@ import sqlite3
 import shutil
 import os
 import master_tools
+import time
 from evaluator import evaluate_task
 
 class Task:
-    def __init__(self, id, prompt, seed_sql, correct_sequence, ground_truth_file, expect_success=True, cus_id=1, today="2026-06-20"):
+    def __init__(self, id, prompt, seed_sql, correct_sequence, ground_truth_file, expect_success=True, cus_id=1, today="2026-06-20", expected_refusal=None):
         self.id = id
         self.prompt = prompt
         self.seed_sql = seed_sql
@@ -15,6 +16,7 @@ class Task:
         self.expect_success = expect_success
         self.cus_id = cus_id
         self.today = today
+        self.expected_refusal = expected_refusal
 
 def setup_db_for_task(task, db_path, seed_db_path):
     master_tools.reset_db(db_path)
@@ -65,6 +67,8 @@ def generate_and_freeze_ground_truth(task, db_path, seed_db_path):
         json.dump(gt, f, indent=2)
     print(f"Ground truth frozen for Task {task.id} at {task.ground_truth_file}")
 
+WRITE_TOOLS = {"add_seats", "cancel_subscription", "downgrade_plan", "upgrade_plan", "cancel_scheduled_downgrade"}
+
 def run_suite(tasks, db_path, seed_db_path, agent_mode=False, backend="anthropic"):
     if agent_mode:
         if backend == "anthropic":
@@ -78,31 +82,83 @@ def run_suite(tasks, db_path, seed_db_path, agent_mode=False, backend="anthropic
     for t in tasks:
         setup_db_for_task(t, db_path, seed_db_path)
         
-        response_text = ""
-        if agent_mode:
-            try:
-                response_text = agent.run_agent(t.prompt, t.cus_id, today=t.today)
-            except Exception as e:
-                print(f"Task {t.id}: FAIL - API/Network Error: {str(e)}")
-                continue
-        else:
-            t.correct_sequence(t.today)
-            
         try:
-            with open(t.ground_truth_file, 'r') as f:
-                ground_truth = json.load(f)
-        except FileNotFoundError:
-            print(f"Task {t.id}: FAIL - Ground truth JSON not found. Run generator first.")
-            continue
+            response_text = ""
+            tool_log = []
             
-        ok, reason = evaluate_task(db_path, ground_truth, seed_db_path)
-        if ok:
-            passed += 1
-            print(f"Task {t.id}: PASS")
-        else:
             if agent_mode:
-                print(f"Task {t.id}: FAIL - {reason}\nAgent Response: {response_text}")
+                try:
+                    response_text, tool_log = agent.run_agent(t.prompt, t.cus_id, today=t.today)
+                except Exception as e:
+                    print(f"Task {t.id}: FAIL - API/Network Error: {str(e)}")
+                    continue
+                    
+                # THREE-WAY EVALUATION GATE (Agent Mode)
+                wrote_to_db = any(
+                    name in WRITE_TOOLS and res is not None and res.get("success") is True
+                    for name, res in tool_log
+                )
+                attempted_write = any(
+                    name in WRITE_TOOLS and res is not None
+                    for name, res in tool_log
+                )
+
+                if not attempted_write:
+                    # Case 3: Never attempted a write
+                    print(f"Task {t.id}: FAIL - Agent failed to attempt any required write-tool action.")
+                    continue
+
+                if not wrote_to_db and not t.expect_success:
+                    # Case 2: Attempted write, but cleanly refused (Policy check with targeted reason matching)
+                    refusal_reasons = [
+                        res.get("reason", "") for name, res in tool_log
+                        if name in WRITE_TOOLS and res is not None and res.get("success") is False
+                    ]
+                    
+                    if not refusal_reasons:
+                        print(f"Task {t.id}: FAIL - Expected refusal but found no structured failure reason.")
+                        continue
+                    
+                    # If an expected refusal keyword was defined, validate it matches
+                    if t.expected_refusal:
+                        matched = any(t.expected_refusal.lower() in reason.lower() for reason in refusal_reasons)
+                        if matched:
+                            passed += 1
+                            print(f"Task {t.id}: PASS (Resfulal Reason Matched: '{t.expected_refusal}')")
+                            continue
+                        else:
+                            print(f"Task {t.id}: FAIL - Refused, but reason(s) {refusal_reasons} did not match expected pattern '{t.expected_refusal}'.")
+                            continue
+                    else:
+                        # Fallback if no specific keyword string was provided
+                        passed += 1
+                        print(f"Task {t.id}: PASS (Refusal Handled Correctly)")
+                        continue
+
             else:
-                print(f"Task {t.id}: FAIL - {reason}")
+                # Baseline Mode: direct execution of ground truth sequence
+                t.correct_sequence(t.today)
+
+            # Case 1: Standard DB Write Execution (or Baseline non-agent execution)
+            try:
+                with open(t.ground_truth_file, 'r') as f:
+                    ground_truth = json.load(f)
+            except FileNotFoundError:
+                print(f"Task {t.id}: FAIL - Ground truth JSON not found. Run generator first.")
+                continue
+                
+            ok, reason = evaluate_task(db_path, ground_truth, seed_db_path)
+            if ok:
+                passed += 1
+                print(f"Task {t.id}: PASS")
+            else:
+                if agent_mode:
+                    print(f"Task {t.id}: FAIL - {reason}\nAgent Response: {response_text}")
+                else:
+                    print(f"Task {t.id}: FAIL - {reason}")
+                    
+        finally:
+            if agent_mode:
+                time.sleep(2)
                 
     print(f"\nFinal Score: {passed}/{len(tasks)}")

@@ -1,10 +1,7 @@
 import json
-from dotenv import load_dotenv
 import anthropic
 import tools
 from policy_prompt import get_system_prompt
-
-load_dotenv()
 
 # ============================================================
 # Tool Schemas
@@ -232,6 +229,7 @@ def run_agent(prompt, cus_id, today="2026-06-20"):
     ]
 
     system_prompt = get_system_prompt(cus_id, today)
+    tool_log = []
 
     for _ in range(10):
         response = client.messages.create(
@@ -269,13 +267,14 @@ def run_agent(prompt, cus_id, today="2026-06-20"):
 
             try:
                 result = tool_func(**claude_args)
-                result_str = json.dumps(result)
-
             except Exception as e:
-                result_str = json.dumps({
+                result = {
                     "success": False,
                     "reason": f"Tool Execution Error: {e}"
-                })
+                }
+
+            tool_log.append((tool_name, result))
+            result_str = json.dumps(result)
 
             tool_results.append(
                 {
@@ -293,7 +292,7 @@ def run_agent(prompt, cus_id, today="2026-06-20"):
                 }
             )
     else:
-        return "AGENT ERROR: exceeded max tool-call iterations"
+        return "AGENT ERROR: exceeded max tool-call iterations", tool_log
 
     final_text = [
         block.text
@@ -301,4 +300,4 @@ def run_agent(prompt, cus_id, today="2026-06-20"):
         if block.type == "text"
     ]
 
-    return final_text[0] if final_text else ""
+    return (final_text[0] if final_text else ""), tool_log

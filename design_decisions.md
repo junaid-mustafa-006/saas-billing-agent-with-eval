@@ -431,6 +431,7 @@ Renewal engine, `paused`, transaction status column, fine-tuning, payment gatewa
 - **Evaluator reason granularity:** returns the first mismatching *table*, not the specific differing rows. Enough for debugging which table diverged; could be extended to diff the multisets and report the differing tuples.
 - **`downgrade_02` ground-truth/policy contradiction (RESOLVED):** fixed by restating the prompt to include an explicit seat count ("Switch my plan to Starter, dropping to 5 seats"), matching `downgrade_01`'s pattern. `correct_sequence` and ground truth were already correct — the prompt was the only thing out of alignment with policy. No regeneration needed.
 - **`chain_01` final-state ambiguity (RESOLVED):** kept the two-step ground truth (`add_seats` then `upgrade_plan`) as canonical — a seat-add and a plan-upgrade are distinct billing events worth separate ledger rows, same principle as §8.5 (the ledger records what actually happened, not just the net financial effect). Fixed via a new system-prompt rule (§12.5/policy_prompt.py EXECUTION RULES) requiring multi-step requests to be executed as separate, sequential tool calls **in the order stated**, with any "total count" target converted to a delta from current state before the corresponding call. Confirmed both totals were mathematically identical either way (541.67) — this was a ledger-shape disagreement, not a money bug.
+- **Refusal false-positive gap (RESOLVED — implemented):** pure final-state grading could not distinguish a refusal task passing because the agent refused for the *correct* reason from one passing because the agent refused (or never even attempted the action) for an unrelated or nonexistent reason — both leave the DB unchanged, both previously PASSed. This was the evaluator's one structurally-provable false-positive case (bounded to the no-write case by the count-preserving multiset design, §7.2/9.2 — see §12.8 for the closed implementation). Built as designed: `tool_log` capture in both agent backends, a three-way outcome gate in `run_suite` (wrote / refused-with-matching-reason / never attempted), and `Task.expected_refusal` for per-task category tags. Confirmed on a full 15-task Gemini run: 15/15, with refusal tasks now genuinely category-matched rather than passing on any DB-unchanged outcome. This is a deliberate, narrow hybrid — final-state grading for successful tasks, trace-inspection for refusal tasks — an explicit departure from the otherwise strictly final-state philosophy (§1.4), not a general replacement of it.
 
 ---
 
@@ -438,7 +439,7 @@ Renewal engine, `paused`, transaction status column, fine-tuning, payment gatewa
 
 Deferred items, each with why it's out of scope now rather than a vague "later."
 
-1. **Smart-recovery vs. clarify, under a user-simulator.** Current ground truth treats ambiguous-direction prompts ("Downgrade me to Enterprise") as silently recoverable — the agent infers intent from the named plan and acts (§8.6 direction policy). Once a multi-turn LLM user-simulator exists (see #6 below), a *better* agent might legitimately ask "did you mean upgrade to Enterprise?" instead of guessing — and for `upgrade_02` specifically, a recovering agent could ask for a lower seat count instead of accepting the seat-cap refusal as final. Current frozen GT would fail both of those better behaviors. Revisit whether smart-recovery should be the ceiling or the floor once clarification is actually measurable.
+1. **Clarifying-question tasks and the smart-recovery/HITL boundary.** Two related deferred items, scoped explicitly (not just noted) this session. First: a single-turn "agent asks, evaluator grades the ask as correct, conversation stops" task type is the near-term plan — cheap to build, requires no new resumption mechanism, and fills a real gap (no current task tests "correctly recognizes it needs more information" as distinct from "succeeds" or "cleanly refuses"). Second, explicitly deferred rather than built: genuine multi-turn resumption (agent asks, receives a scripted or simulated answer, gets graded on the *post-answer* final state) requires a user-simulator (item 6) and a redesign of `run_agent`'s single-call contract — real architecture work, not a config change. Also revisit whether smart-recovery (current default: infer intent, act, don't ask) should be the ceiling or the floor once either of the above exists — an agent that asks instead of guessing may be *better* than current ground truth rewards for ambiguous-direction prompts like "Downgrade me to Enterprise," and current frozen GT would fail that better behavior.
 2. **Fine-tuning** a billing-specialist model, benchmarked against the base model on this eval (the eval is the prerequisite).
 3. **Mock payment gateway** — live payment simulation to watch the agent act (demo/UX layer).
 4. **Daily renewal engine** — server sweep: retries autopay, flips `scheduled_activation → active` and `scheduled_downgrade → cancelled` at term-end, sets `paused` on failed renewal. Reintroduces `paused`.
@@ -555,6 +556,14 @@ In short:
 - Seat-cap information is agent-visible because it supports planning.
 - Payment status is tool-owned because it represents authoritative business logic.
 
+### Generalized rule: read-tool results inform *how* to write, never *whether* to write
+
+The payment-status asymmetry above is one instance of a broader rule, made explicit in the system prompt after a real failure exposed it: for any hard, binary, non-negotiable precondition readable via a read-tool (no valid payment method, no active subscription to act on), the agent must still attempt the corresponding write-tool call rather than self-determining the outcome from the read and skipping the call. A read-tool result may change *how* a write-tool is called (e.g. proposing a valid seat count after seeing `seat_cap`), but must never be used to decide *whether* to call it at all when the target action is otherwise required by the task.
+
+This was first established narrowly (payment status only) and later found to under-cover a structurally identical case: a task where the agent read `get_active_subscription`, correctly observed no active subscription existed, and — reasonably but incorrectly per this rule — concluded there was nothing to cancel and never called `cancel_subscription`. The real-world conclusion was right; the omission of the write-tool call was not, because it moved business-rule authority from the tool to the model's inference, exactly the boundary §8.1's tools-enforce/agent-orchestrates principle exists to hold. The rule was generalized rather than special-cased per precondition:
+
+> Read-tool results inform how you call a write-tool, but never whether you call it. Even if a read-tool suggests an action will fail, you must still attempt the corresponding write-tool call. The tool's refusal is the authoritative source of truth — do not skip a write based on your own inference.
+
 ---
 
 ### 12.5 Smart recovery policy
@@ -646,15 +655,25 @@ run_suite(
 )
 ```
 
-- `agent_mode=False` executes each task's original `correct_sequence()` implementation, preserving the proof-of-evaluation pipeline introduced in W2.
+- `agent_mode=False` executes each task's original `correct_sequence()` implementation, preserving the proof-of-evaluation pipeline introduced in W2, and is graded purely by `evaluate_task()` against the frozen ground truth, unchanged since W2.
 - `agent_mode=True` invokes:
 
 ```python
 agent.run_agent(prompt, cus_id, today)
 ```
 
-using the selected backend.
+using the selected backend, and is graded by the three-way outcome gate described in §12.8 — `evaluate_task()` is still the grading mechanism for the DB-write outcome specifically, but is no longer the only path a task can pass through.
 
-Regardless of execution mode, the resulting SQLite database state is evaluated by the same `evaluate_task()` function.
+---
 
-The evaluation framework therefore remains completely backend-agnostic and never branches based on whether database modifications were produced by deterministic tool calls or by an LLM agent.
+### 12.8 The three-way grading gate (refusal-category checking)
+
+`agent_mode=True` tasks are resolved into exactly one of three outcomes before any DB-state comparison is attempted, closing the false-positive gap described in §10 ("Refusal false-positive gap"):
+
+1. **A write-tool succeeded** (`result["success"] is True` for some logged call to a tool in `WRITE_TOOLS`) → graded by the existing `evaluate_task()` multiset comparison against frozen ground truth, exactly as in W2/W3. No change to this path.
+2. **A write-tool was called and refused, task expects refusal** (`t.expect_success is False`, and some logged write-tool call has `success: False`) → the refusal's `reason` string is checked for a substring match against `t.expected_refusal`, a per-task keyword tag. Only a genuine category match passes; a refusal for an unrelated or unexpected reason fails, even though the DB is equally unchanged in both cases.
+3. **No write-tool call appears anywhere in the captured `tool_log`** → automatic fail, regardless of how many read-tool calls preceded it or what the agent's final free-text response claimed. This is deliberately unconditional: an agent that read state and self-determined an action was unnecessary has skipped a required attempt, which §12.4's generalized read-vs-write rule treats as incorrect regardless of whether the underlying real-world conclusion happened to be right.
+
+Mechanism: both `agent_claude.py` and `agent_gemini.py` capture `(tool_name, result)` for every executed tool call into a `tool_log` list during the agent loop and return it alongside the final text response. `run_suite` filters this log by `WRITE_TOOLS` membership (guarding against `None` results from read-tools, e.g. `get_active_subscription` returning `None` for a customer with no active subscription) before applying the three-way logic above. No natural-language parsing of the agent's response is used anywhere in this gate — every check operates on the raw, structured tool-call data the harness itself captured.
+
+The evaluation framework remains backend-agnostic — neither the `WRITE_TOOLS` gate nor `evaluate_task()` branches on which LLM produced the tool calls being graded — but it is no longer execution-mode-agnostic in the way early W3 described: `agent_mode=False` is graded purely by final DB state, while `agent_mode=True` is graded by the three-way gate above, of which final DB-state comparison is one path, not the only one. This asymmetry is deliberate (§10, "Refusal false-positive gap") — the deterministic `correct_sequence()` path never produces the ambiguity the gate exists to resolve, so applying the same machinery to it would be unnecessary complexity with no corresponding benefit.

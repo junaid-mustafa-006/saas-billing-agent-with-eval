@@ -1,4 +1,5 @@
 import json
+import os
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -228,6 +229,7 @@ def run_agent(prompt, cus_id, today="2026-06-20"):
     messages = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
 
     system_prompt = get_system_prompt(cus_id, today)
+    tool_log = []
 
     config = types.GenerateContentConfig(
         system_instruction=system_prompt,
@@ -261,13 +263,14 @@ def run_agent(prompt, cus_id, today="2026-06-20"):
 
             try:
                 result = tool_func(**tool_args)
-                result_str = json.dumps(result)
-
             except Exception as e:
-                result_str = json.dumps({
+                result = {
                     "success": False,
                     "reason": f"Tool Execution Error: {e}"
-                })
+                }
+
+            tool_log.append((tool_name, result))
+            result_str = json.dumps(result)
 
             tool_results.append(
                 types.Part.from_function_response(
@@ -284,6 +287,6 @@ def run_agent(prompt, cus_id, today="2026-06-20"):
                 )
             )
     else:
-        return "AGENT ERROR: exceeded max tool-call iterations"
+        return "AGENT ERROR: exceeded max tool-call iterations", tool_log
 
-    return response.text if response.text else ""
+    return (response.text if response.text else ""), tool_log
